@@ -33,18 +33,14 @@ import argparse
 import csv
 import json
 import os
-import ssl
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
+import requests
+import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Bypass SSL verification for Mac Python installs missing root certificates.
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Clay people-search endpoint — verify against https://docs.clay.com
 CLAY_PEOPLE_SEARCH_URL = "https://api.clay.com/v1/sources/people-search"
@@ -101,14 +97,6 @@ def clay_search(domain: str, api_key: str, limit: int, title_keywords: list[str]
         }
       }
     """
-    body = json.dumps({
-        "domain": domain,
-        "limit": limit,
-        "filters": {
-            "job_title_keywords": title_keywords,
-        },
-    }).encode("utf-8")
-
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -116,13 +104,22 @@ def clay_search(domain: str, api_key: str, limit: int, title_keywords: list[str]
 
     delay = 2.0
     for attempt in range(max_retries + 1):
-        req = urllib.request.Request(
-            CLAY_PEOPLE_SEARCH_URL, data=body, headers=headers, method="POST"
-        )
         try:
-            with urllib.request.urlopen(req, timeout=60, context=_SSL_CTX) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            # Adjust these field names to match Clay's actual response shape.
+            resp = requests.post(
+                CLAY_PEOPLE_SEARCH_URL,
+                json={"domain": domain, "limit": limit, "filters": {"job_title_keywords": title_keywords}},
+                headers=headers,
+                timeout=60,
+                verify=False,
+            )
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            if not resp.ok:
+                sys.stderr.write(f"[http {resp.status_code}] {domain}: {resp.text[:200]}\n")
+                return []
+            payload = resp.json()
             contacts = (
                 payload.get("contacts")
                 or payload.get("people")
@@ -131,19 +128,7 @@ def clay_search(domain: str, api_key: str, limit: int, title_keywords: list[str]
                 or []
             )
             return contacts
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries:
-                time.sleep(delay)
-                delay *= 2
-                continue
-            body_text = ""
-            try:
-                body_text = e.read().decode("utf-8")[:200]
-            except Exception:
-                pass
-            sys.stderr.write(f"[http {e.code}] {domain}: {e.reason} {body_text}\n")
-            return []
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        except Exception as e:
             if attempt < max_retries:
                 time.sleep(delay)
                 delay *= 2
