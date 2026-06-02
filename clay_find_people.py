@@ -33,12 +33,18 @@ import argparse
 import csv
 import json
 import os
+import ssl
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Bypass SSL verification for Mac Python installs missing root certificates.
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # Clay people-search endpoint — verify against https://docs.clay.com
 CLAY_PEOPLE_SEARCH_URL = "https://api.clay.com/v1/sources/people-search"
@@ -114,7 +120,7 @@ def clay_search(domain: str, api_key: str, limit: int, title_keywords: list[str]
             CLAY_PEOPLE_SEARCH_URL, data=body, headers=headers, method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=_SSL_CTX) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             # Adjust these field names to match Clay's actual response shape.
             contacts = (
